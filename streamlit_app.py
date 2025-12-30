@@ -13,10 +13,10 @@ def fix_headers(df):
     return df
 
 # Настройка страницы
-st.set_page_config(page_title="Мониторинг Nуч: Динамика", layout="wide")
+st.set_page_config(page_title="Детальный мониторинг Nуч", layout="wide")
 
 # --- ОФОРМЛЕНИЕ ---
-st.title("🚂 Сравнительный анализ Nуч: Текущий vs Прошлый проезд")
+st.title("🚂 Сравнительный анализ Nуч и изменений по километрам")
 
 if os.path.exists("header.png"):
     st.image("header.png", use_container_width=True)
@@ -51,7 +51,7 @@ def process_excel_data(file):
     try:
         df = pd.read_excel(file, sheet_name='Оценка КМ')
         df = fix_headers(df)
-        cols = ['КМ', 'ОЦЕНКА', 'КОДНАПР']
+        cols = ['КМ', 'ОЦЕНКА', 'КОДНАПР', 'ПУТЬ']
         df = df.dropna(subset=cols)
         for c in cols:
             df[c] = pd.to_numeric(df[c], errors='coerce')
@@ -59,7 +59,7 @@ def process_excel_data(file):
     except:
         return None
 
-def get_nuch_results(df_eval, df_base):
+def get_detailed_results(df_eval, df_base):
     if df_eval is None: return {}
     results = {}
     valid_dirs = {24602, 24603, 24701}
@@ -83,107 +83,100 @@ def get_nuch_results(df_eval, df_base):
                                      (seg['ОЦЕНКА']==3).sum(), (seg['ОЦЕНКА']==2).sum()
                     n_uch = round((s5*5 + s4*4 + s3*3 - s2*5) / len(seg), 2)
                     
-                    # Уникальный ключ для сопоставления перегона
-                    key = f"{direction}_{path}_{st_a['СТАНЦИЯ']}_{st_b['СТАНЦИЯ']}"
+                    # Создаем словарь км -> оценка для этого перегона
+                    km_map = dict(zip(seg['КМ'].astype(int), seg['ОЦЕНКА'].astype(int)))
                     
+                    key = f"{direction}_{path}_{st_a['СТАНЦИЯ']}_{st_b['СТАНЦИЯ']}"
                     results[key] = {
                         'Направление': int(direction), 'Путь': int(path),
                         'Перегон': f"{st_a['СТАНЦИЯ']} - {st_b['СТАНЦИЯ']}",
                         'Км нач': int(km_s), 'Км кон': int(km_e), 'Всего Км': int(len(seg)),
                         'Nуч': n_uch, 'Отл': int(s5), 'Хор': int(s4), 'Удов': int(s3), 'Неуд': int(s2),
-                        'Список Отл км': ", ".join(seg[seg['ОЦЕНКА']==5]['КМ'].astype(int).astype(str)),
-                        'Список Хор км': ", ".join(seg[seg['ОЦЕНКА']==4]['КМ'].astype(int).astype(str)),
-                        'Список Удов км': ", ".join(seg[seg['ОЦЕНКА']==3]['КМ'].astype(int).astype(str)),
-                        'Список Неуд км': ", ".join(seg[seg['ОЦЕНКА']==2]['КМ'].astype(int).astype(str))
+                        'km_map': km_map
                     }
     return results
 
 if file_curr:
-    df_curr_data = process_excel_data(file_curr)
-    res_curr = get_nuch_results(df_curr_data, df_base)
+    df_c_data = process_excel_data(file_curr)
+    res_curr = get_detailed_results(df_c_data, df_base)
     
-    # Если загружен прошлый месяц, делаем сопоставление
-    df_prev_data = process_excel_data(file_prev)
-    res_prev = get_nuch_results(df_prev_data, df_base) if file_prev else {}
+    df_p_data = process_excel_data(file_prev)
+    res_prev = get_detailed_results(df_p_data, df_base) if file_prev else {}
 
     comparison_results = []
     for key, data in res_curr.items():
-        prev_nuch = res_prev.get(key, {}).get('Nуч', None)
+        prev_data = res_prev.get(key, {})
+        prev_nuch = prev_data.get('Nуч', None)
+        prev_km_map = prev_data.get('km_map', {})
+        curr_km_map = data.get('km_map', {})
         
-        if prev_nuch is not None:
-            delta = round(data['Nуч'] - prev_nuch, 2)
-        else:
-            delta = 0.0
-            
+        # Сравниваем оценки по каждому километру
+        changes = []
+        for km, score in curr_km_map.items():
+            if km in prev_km_map:
+                old_score = prev_km_map[km]
+                if score != old_score:
+                    changes.append(f"{km}км ({old_score}→{score})")
+        
+        change_str = ", ".join(changes) if changes else "Без изменений"
+        
         data['Прошлый Nуч'] = prev_nuch if prev_nuch is not None else data['Nуч']
-        data['Динамика'] = delta
-        comparison_results.append(data)
+        data['Динамика'] = round(data['Nуч'] - data['Прошлый Nуч'], 2)
+        data['Изменившиеся км'] = change_str
+        
+        # Убираем km_map из финальной таблицы
+        output_row = {k: v for k, v in data.items() if k != 'km_map'}
+        comparison_results.append(output_row)
 
     df_final = pd.DataFrame(comparison_results).sort_values('Nуч')
 
-    # --- KPI КАРТОЧКИ ---
-    st.subheader("📈 Итоги проезда")
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    # --- KPI ---
+    st.subheader("📊 Анализ изменений")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Средний Nуч", f"{df_final['Nуч'].mean():.2f}")
+    k2.metric("Улучшилось перегонов", len(df_final[df_final['Динамика'] > 0]))
+    k3.metric("Ухудшилось перегонов", len(df_final[df_final['Динамика'] < 0]))
+
+    # --- ТАБЛИЦА ---
+    st.subheader("📋 Детальный отчет")
     
-    avg_curr = df_final['Nуч'].mean()
-    avg_prev = df_final['Прошлый Nуч'].mean()
-    delta_total = avg_curr - avg_prev
+    def style_diff(val):
+        if "→" in str(val):
+            # Проверяем, стало лучше или хуже в строке
+            if any(int(x[0]) < int(x[-1]) for x in [val.split('(')[-1].replace(')','').split('→') if '→' in val else "0→0"]):
+                return 'background-color: #e6ffed'
+        return ''
 
-    kpi1.metric("Средний Nуч (Тек)", f"{avg_curr:.2f}", delta=f"{delta_total:+.2f}")
-    kpi2.metric("Кол-во Неуд км", df_final['Неуд'].sum())
-    kpi3.metric("Перегонов в работе", len(df_final))
-    kpi4.metric("Всего Км", df_final['Всего Км'].sum())
+    st.dataframe(
+        df_final.style.format({"Nуч": "{:.2f}", "Прошлый Nуч": "{:.2f}", "Динамика": "{:+.2f}"})
+        .background_gradient(subset=['Nуч'], cmap='RdYlGn')
+        .applymap(lambda x: 'color: green' if x > 0 else ('color: red' if x < 0 else ''), subset=['Динамика']),
+        use_container_width=True
+    )
 
-    # --- ТАБЛИЦА В БРАУЗЕРЕ ---
-    st.subheader("📊 Детальная таблица сравнения")
-    
-    def style_delta(val):
-        color = 'green' if val > 0 else 'red' if val < 0 else 'black'
-        return f'color: {color}; font-weight: bold'
-
-    styled_res = df_final.style.format({
-        "Nуч": "{:.2f}", "Прошлый Nуч": "{:.2f}", "Динамика": "{:+.2f}"
-    }).applymap(style_delta, subset=['Динамика']).background_gradient(subset=['Nуч'], cmap='RdYlGn')
-
-    st.dataframe(styled_res, use_container_width=True)
-
-    # --- ГЕНЕРАЦИЯ EXCEL ---
+    # --- EXCEL ---
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_final.to_excel(writer, index=False, sheet_name='Анализ Динамики', startrow=1)
-        workbook  = writer.book
-        worksheet = writer.sheets['Анализ Динамики']
+        df_final.to_excel(writer, index=False, sheet_name='Анализ', startrow=1)
+        workbook = writer.book
+        worksheet = writer.sheets['Анализ']
         
-        # Форматы
-        f_int = workbook.add_format({'border': 1, 'align': 'center', 'num_format': '0'})
+        f_int = workbook.add_format({'border': 1, 'align': 'center'})
         f_float = workbook.add_format({'border': 1, 'align': 'center', 'num_format': '0.00'})
-        f_bold_float = workbook.add_format({'border': 1, 'align': 'center', 'num_format': '0.00', 'bold': True})
-        f_hdr = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#D9D9D9', 'align': 'center'})
+        f_bold = workbook.add_format({'border': 1, 'align': 'center', 'bold': True})
         
-        # Заголовки
         for c_idx, col in enumerate(df_final.columns):
-            worksheet.write(1, c_idx, col, f_hdr)
-        
-        # Данные
-        for r_idx in range(len(df_final)):
-            row = r_idx + 2
-            for c_idx, col in enumerate(df_final.columns):
-                val = df_final.iloc[r_idx][col]
-                
-                if col in ['Nуч', 'Прошлый Nуч', 'Динамика']:
-                    worksheet.write(row, c_idx, val, f_bold_float)
-                elif any(x in col for x in ['Направление', 'Путь', 'Км', 'Отл', 'Хор', 'Удов', 'Неуд']):
-                    try:
-                        worksheet.write(row, c_idx, int(val), f_int)
-                    except:
-                        worksheet.write(row, c_idx, val, f_int)
-                else:
-                    worksheet.write(row, c_idx, val, f_int)
+            worksheet.set_column(c_idx, c_idx, 20 if "Изменившиеся" in col else 12)
+            
+        # Условное форматирование для Динамики в Excel
+        worksheet.conditional_format(2, df_final.columns.get_loc('Динамика'), len(df_final)+1, df_final.columns.get_loc('Динамика'), {
+            'type':     'cell',
+            'criteria': '>',
+            'value':    0,
+            'format':   workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
+        })
 
-        for i, col in enumerate(df_final.columns):
-            worksheet.set_column(i, i, 40 if "Список" in col else 12)
-
-    st.download_button("📥 Скачать сравнительный отчет (Excel)", output.getvalue(), "Nuch_Dynamics_Report.xlsx")
+    st.download_button("📥 Скачать детальный отчет", output.getvalue(), "Nuch_Km_Changes.xlsx")
 
 else:
-    st.info("💡 Пожалуйста, загрузите текущий файл оценки для начала расчета.")
+    st.info("💡 Загрузите два файла для сравнения изменений по километрам.")
