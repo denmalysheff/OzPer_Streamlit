@@ -100,10 +100,17 @@ if file_eval:
         if results:
             df_res = pd.DataFrame(results).sort_values(by='Nуч', ascending=True)
             
+            # ПРИНУДИТЕЛЬНОЕ ПРЕОБРАЗОВАНИЕ ТИПОВ ДЛЯ EXCEL
+            # Чтобы Excel не видел ".00" в целых числах
+            int_columns = ['Направление', 'Путь', 'Км нач', 'Км кон', 'Всего Км', 'Отл', 'Хор', 'Удов', 'Неуд']
+            for col in int_columns:
+                if col in df_res.columns:
+                    df_res[col] = df_res[col].astype(int)
+
             st.subheader("📊 Результаты расчета")
-            # Отображение в браузере: Nуч - 2 знака, остальное - как есть (целые)
+            # Отображение в браузере
             st.dataframe(
-                df_res.style.format({"Nуч": "{:.2f}"}, precision=0)
+                df_res.style.format({"Nуч": "{:.2f}"})
                 .background_gradient(subset=['Nуч'], cmap='RdYlGn'), 
                 use_container_width=True
             )
@@ -115,12 +122,11 @@ if file_eval:
                 workbook  = writer.book
                 worksheet = writer.sheets['Результат']
                 
-                # Стили: Целое ('0') и Дробное ('0.00')
+                # Форматы
                 fmt_int = '0'
                 fmt_float = '0.00'
                 base = {'border': 1, 'align': 'center', 'valign': 'vcenter'}
                 
-                # Наборы стилей для строк (Цвет + Формат числа)
                 styles = {
                     'green':  [workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_int}),
                                workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_float, 'bold': True})],
@@ -139,7 +145,7 @@ if file_eval:
 
                 for r_idx in range(len(df_res)):
                     val = df_res.iloc[r_idx]['Nуч']
-                    row = r_idx + 2
+                    row_num = r_idx + 2
                     
                     if val > 4: key = 'green'
                     elif 3 < val <= 4: key = 'blue'
@@ -149,9 +155,15 @@ if file_eval:
                     st_i, st_f = styles[key]
                     
                     # Применяем целое форматирование ко всей строке
-                    worksheet.set_row(row, None, st_i)
-                    # Перезаписываем только ячейку Nуч дробным форматом
-                    worksheet.write(row, n_uch_idx, val, st_f)
+                    worksheet.set_row(row_num, None, st_i)
+                    
+                    # Перезаписываем данные вручную, чтобы точно контролировать тип
+                    for c_idx, col_name in enumerate(df_res.columns):
+                        cell_value = df_res.iloc[r_idx][col_name]
+                        if col_name == 'Nуч':
+                            worksheet.write(row_num, c_idx, cell_value, st_f)
+                        else:
+                            worksheet.write(row_num, c_idx, cell_value, st_i)
 
                 for i, col in enumerate(df_res.columns):
                     worksheet.set_column(i, i, 40 if col == 'Список Неуд км' else 12)
@@ -160,6 +172,6 @@ if file_eval:
                                file_name="Nuch_Report.xlsx", 
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.warning("⚠️ Данные не найдены.")
+            st.warning("⚠️ Совпадений не найдено. Проверьте КОДНАПР в файлах.")
     except Exception as e:
         st.error(f"❌ Ошибка: {e}")
