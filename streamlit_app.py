@@ -21,7 +21,7 @@ st.title("🚂 Расчет балловой оценки состояния п�
 if os.path.exists("header.png"):
     st.image("header.png", use_container_width=True)
 else:
-    st.info("💡 Загрузите файл 'header.png' в репозиторий GitHub для отображения баннера.")
+    st.info("💡 Загрузите файл 'header.png' для отображения баннера.")
 
 st.markdown("---")
 
@@ -100,20 +100,28 @@ if file_eval:
         if results:
             df_res = pd.DataFrame(results).sort_values(by='Nуч', ascending=True)
             
-            # ПРИНУДИТЕЛЬНОЕ ПРЕОБРАЗОВАНИЕ ТИПОВ ДЛЯ EXCEL
-            # Чтобы Excel не видел ".00" в целых числах
-            int_columns = ['Направление', 'Путь', 'Км нач', 'Км кон', 'Всего Км', 'Отл', 'Хор', 'Удов', 'Неуд']
-            for col in int_columns:
-                if col in df_res.columns:
-                    df_res[col] = df_res[col].astype(int)
+            # Приведение всех "числовых" колонок к INT для корректного отображения
+            int_cols = ['Направление', 'Путь', 'Км нач', 'Км кон', 'Всего Км', 'Отл', 'Хор', 'Удов', 'Неуд']
+            for c in int_cols:
+                if c in df_res.columns:
+                    df_res[c] = df_res[c].astype(int)
 
             st.subheader("📊 Результаты расчета")
-            # Отображение в браузере
-            st.dataframe(
-                df_res.style.format({"Nуч": "{:.2f}"})
-                .background_gradient(subset=['Nуч'], cmap='RdYlGn'), 
-                use_container_width=True
-            )
+            
+            # Форматирование в браузере (Nуч - 2 знака, остальное - целое)
+            styled_df = df_res.style.format({
+                "Nуч": "{:.2f}",
+                "Направление": "{:d}", "Путь": "{:d}", "Км нач": "{:d}", 
+                "Км кон": "{:d}", "Всего Км": "{:d}", "Отл": "{:d}", 
+                "Хор": "{:d}", "Удов": "{:d}", "Неуд": "{:d}"
+            })
+
+            # Пытаемся применить градиент, если matplotlib установлен
+            try:
+                st.dataframe(styled_df.background_gradient(subset=['Nуч'], cmap='RdYlGn'), use_container_width=True)
+            except ImportError:
+                st.warning("⚠️ Для цветной подсветки таблицы выполните: pip install matplotlib")
+                st.dataframe(styled_df, use_container_width=True)
 
             # --- ГЕНЕРАЦИЯ EXCEL ---
             output = io.BytesIO()
@@ -122,11 +130,11 @@ if file_eval:
                 workbook  = writer.book
                 worksheet = writer.sheets['Результат']
                 
-                # Форматы
                 fmt_int = '0'
                 fmt_float = '0.00'
                 base = {'border': 1, 'align': 'center', 'valign': 'vcenter'}
                 
+                # Цвета для Excel
                 styles = {
                     'green':  [workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_int}),
                                workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_float, 'bold': True})],
@@ -154,16 +162,15 @@ if file_eval:
                     
                     st_i, st_f = styles[key]
                     
-                    # Применяем целое форматирование ко всей строке
-                    worksheet.set_row(row_num, None, st_i)
-                    
-                    # Перезаписываем данные вручную, чтобы точно контролировать тип
+                    # Записываем ячейки: Nуч дробно, остальное целым
                     for c_idx, col_name in enumerate(df_res.columns):
-                        cell_value = df_res.iloc[r_idx][col_name]
+                        cell_val = df_res.iloc[r_idx][col_name]
                         if col_name == 'Nуч':
-                            worksheet.write(row_num, c_idx, cell_value, st_f)
+                            worksheet.write(row_num, c_idx, cell_val, st_f)
+                        elif col_name == 'Список Неуд км' or col_name == 'Перегон':
+                            worksheet.write(row_num, c_idx, cell_val, st_i) # Для текста формат игнорируется
                         else:
-                            worksheet.write(row_num, c_idx, cell_value, st_i)
+                            worksheet.write(row_num, c_idx, int(cell_val), st_i)
 
                 for i, col in enumerate(df_res.columns):
                     worksheet.set_column(i, i, 40 if col == 'Список Неуд км' else 12)
@@ -172,6 +179,6 @@ if file_eval:
                                file_name="Nuch_Report.xlsx", 
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.warning("⚠️ Совпадений не найдено. Проверьте КОДНАПР в файлах.")
+            st.warning("⚠️ Совпадений не найдено.")
     except Exception as e:
         st.error(f"❌ Ошибка: {e}")
