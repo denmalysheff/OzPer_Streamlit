@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import os
 
-# 1. Функция исправления заголовков (убирает пробелы и фиксит латиницу)
+# 1. Функция исправления заголовков
 def fix_headers(df):
     def clean_text(text):
         if not isinstance(text, str): return text
@@ -15,60 +15,53 @@ def fix_headers(df):
 # Настройка страницы
 st.set_page_config(page_title="Учет Nуч по перегонам", layout="wide")
 
-# --- ОФОРМЛЕНИЕ И ИНТЕРФЕЙС ---
-st.title("🚂 Расчет оценки состояния пути (Nуч)")
+# --- ОФОРМЛЕНИЕ ---
+st.title("🚂 Расчет балловой оценки состояния пути (Nуч)")
 
-# Вставка баннера (файл должен лежать на GitHub рядом с этим скриптом)
 if os.path.exists("header.png"):
     st.image("header.png", use_container_width=True)
 else:
-    st.info("💡 Здесь будет ваш баннер header.png (загрузите его в репозиторий)")
+    st.info("💡 Загрузите файл 'header.png' в репозиторий GitHub для отображения баннера.")
 
 st.markdown("---")
 
-# 2. Поиск базы станций в корне проекта
+# 2. Поиск базы станций
 base_file_name = "stations_base.xlsx"
-
 if os.path.exists(base_file_name):
     try:
         df_base_raw = pd.read_excel(base_file_name)
         df_base = fix_headers(df_base_raw)
-        
-        # Очистка базы
         df_base = df_base.dropna(subset=['КООРДИНАТА', 'НАПРАВЛЕНИЕ'])
         df_base['КООРДИНАТА'] = pd.to_numeric(df_base['КООРДИНАТА'], errors='coerce')
         df_base = df_base.dropna(subset=['КООРДИНАТА'])
-        
         st.sidebar.success("✅ База станций подключена")
     except Exception as e:
         st.error(f"Ошибка в файле базы: {e}")
         st.stop()
 else:
-    st.error(f"❌ Файл '{base_file_name}' не найден в репозитории!")
+    st.error(f"❌ Файл '{base_file_name}' не найден!")
     st.stop()
 
-# 3. Загрузка файла оценки пользователем
-file_eval = st.file_uploader("Загрузите файл ОЦЕНКИ (км)", type="xlsx")
+# 3. Загрузка файла оценки
+file_eval = st.file_uploader("Загрузите файл ОЦЕНКИ (лист 'Оценка КМ')", type="xlsx")
 
 if file_eval:
     try:
-        # Читаем лист 'Оценка КМ'
         df_eval_raw = pd.read_excel(file_eval, sheet_name='Оценка КМ')
         df_eval = fix_headers(df_eval_raw)
 
-        # Жесткая очистка данных от NaN
-        df_eval = df_eval.dropna(subset=['КМ', 'ОЦЕНКА', 'КОДНАПР'])
-        df_eval['КМ'] = pd.to_numeric(df_eval['КМ'], errors='coerce')
-        df_eval['ОЦЕНКА'] = pd.to_numeric(df_eval['ОЦЕНКА'], errors='coerce')
-        df_eval['КОДНАПР'] = pd.to_numeric(df_eval['КОДНАПР'], errors='coerce')
-        df_eval = df_eval.dropna(subset=['КМ', 'ОЦЕНКА', 'КОДНАПР'])
+        # Очистка данных
+        cols_to_check = ['КМ', 'ОЦЕНКА', 'КОДНАПР']
+        df_eval = df_eval.dropna(subset=cols_to_check)
+        for col in cols_to_check:
+            df_eval[col] = pd.to_numeric(df_eval[col], errors='coerce')
+        df_eval = df_eval.dropna(subset=cols_to_check)
 
         results = []
         valid_dirs = {24602, 24603, 24701}
         
         for direction in df_base['НАПРАВЛЕНИЕ'].unique():
-            if direction not in valid_dirs:
-                continue
+            if direction not in valid_dirs: continue
             
             stations = df_base[df_base['НАПРАВЛЕНИЕ'] == direction].sort_values('КООРДИНАТА')
             paths = df_eval[df_eval['КОДНАПР'] == direction]['ПУТЬ'].unique()
@@ -86,38 +79,31 @@ if file_eval:
                                          (seg['ОЦЕНКА']==3).sum(), (seg['ОЦЕНКА']==2).sum()
                         all_km = len(seg)
                         
-                        # Расчет и явное округление
                         n_uch_val = (s5*5 + s4*4 + s3*3 - s2*5) / all_km
                         n_uch = round(float(n_uch_val), 2)
                         
-                        # Список КМ с оценкой 2
                         neud_list = seg[seg['ОЦЕНКА'] == 2]['КМ'].astype(int).astype(str).tolist()
                         neud_str = ", ".join(neud_list)
                         
-                        # Собираем данные в нужном вам порядке
                         results.append({
-                            'Направление': direction,
-                            'Путь': path,
+                            'Направление': int(direction),
+                            'Путь': int(path),
                             'Перегон': f"{st_a['СТАНЦИЯ']} - {st_b['СТАНЦИЯ']}",
-                            'Км нач': km_s,
-                            'Км кон': km_e,
-                            'Всего Км': all_km,
+                            'Км нач': int(km_s),
+                            'Км кон': int(km_e),
+                            'Всего Км': int(all_km),
                             'Nуч': n_uch,
-                            'Отл': int(s5),
-                            'Хор': int(s4),
-                            'Удов': int(s3),
-                            'Неуд': int(s2),
+                            'Отл': int(s5), 'Хор': int(s4), 'Удов': int(s3), 'Неуд': int(s2),
                             'Список Неуд км': neud_str
                         })
 
         if results:
             df_res = pd.DataFrame(results).sort_values(by='Nуч', ascending=True)
             
-            st.subheader("📊 Таблица результатов")
-            
-            # Отображение в браузере с форматом 3.66 и градиентом
+            st.subheader("📊 Результаты расчета")
+            # Отображение в браузере: Nуч - 2 знака, остальное - как есть (целые)
             st.dataframe(
-                df_res.style.format({"Nуч": "{:.2f}"})
+                df_res.style.format({"Nуч": "{:.2f}"}, precision=0)
                 .background_gradient(subset=['Nуч'], cmap='RdYlGn'), 
                 use_container_width=True
             )
@@ -129,41 +115,51 @@ if file_eval:
                 workbook  = writer.book
                 worksheet = writer.sheets['Результат']
                 
-                # Форматы ячеек (числовой формат 0.00)
-                num_fmt = '0.00'
-                fmt_header = workbook.add_format({'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#F2F2F2'})
-                fmt_common = workbook.add_format({'border': 1, 'num_format': num_fmt})
+                # Стили: Целое ('0') и Дробное ('0.00')
+                fmt_int = '0'
+                fmt_float = '0.00'
+                base = {'border': 1, 'align': 'center', 'valign': 'vcenter'}
                 
-                fmt_red    = workbook.add_format({'bg_color': '#FFC7CE', 'border': 1, 'num_format': num_fmt})
-                fmt_orange = workbook.add_format({'bg_color': '#FFEB9C', 'border': 1, 'num_format': num_fmt})
-                fmt_blue   = workbook.add_format({'bg_color': '#DDEBF7', 'border': 1, 'num_format': num_fmt})
-                fmt_green  = workbook.add_format({'bg_color': '#C6EFCE', 'border': 1, 'num_format': num_fmt})
-
-                # Заголовок
+                # Наборы стилей для строк (Цвет + Формат числа)
+                styles = {
+                    'green':  [workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_int}),
+                               workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_float, 'bold': True})],
+                    'blue':   [workbook.add_format({**base, 'bg_color': '#DDEBF7', 'num_format': fmt_int}),
+                               workbook.add_format({**base, 'bg_color': '#DDEBF7', 'num_format': fmt_float, 'bold': True})],
+                    'orange': [workbook.add_format({**base, 'bg_color': '#FFEB9C', 'num_format': fmt_int}),
+                               workbook.add_format({**base, 'bg_color': '#FFEB9C', 'num_format': fmt_float, 'bold': True})],
+                    'red':    [workbook.add_format({**base, 'bg_color': '#FFC7CE', 'num_format': fmt_int}),
+                               workbook.add_format({**base, 'bg_color': '#FFC7CE', 'num_format': fmt_float, 'bold': True})]
+                }
+                
+                fmt_header = workbook.add_format({'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#F2F2F2'})
                 worksheet.merge_range(0, 0, 0, len(df_res.columns)-1, "Отчет по балловой оценке состояния пути", fmt_header)
 
-                # Раскраска строк по значению Nуч
-                for row_num in range(2, len(df_res) + 2):
-                    val = df_res.iloc[row_num-2]['Nуч']
-                    if val > 4: curr_fmt = fmt_green
-                    elif 3 < val <= 4: curr_fmt = fmt_blue
-                    elif 2.5 < val <= 3: curr_fmt = fmt_orange
-                    else: curr_fmt = fmt_red
-                    worksheet.set_row(row_num, None, curr_fmt)
+                n_uch_idx = df_res.columns.get_loc('Nуч')
 
-                # Настройка ширины колонок
+                for r_idx in range(len(df_res)):
+                    val = df_res.iloc[r_idx]['Nуч']
+                    row = r_idx + 2
+                    
+                    if val > 4: key = 'green'
+                    elif 3 < val <= 4: key = 'blue'
+                    elif 2.5 < val <= 3: key = 'orange'
+                    else: key = 'red'
+                    
+                    st_i, st_f = styles[key]
+                    
+                    # Применяем целое форматирование ко всей строке
+                    worksheet.set_row(row, None, st_i)
+                    # Перезаписываем только ячейку Nуч дробным форматом
+                    worksheet.write(row, n_uch_idx, val, st_f)
+
                 for i, col in enumerate(df_res.columns):
-                    w = 35 if col == 'Список Неуд км' else 15
-                    worksheet.set_column(i, i, w)
+                    worksheet.set_column(i, i, 40 if col == 'Список Неуд км' else 12)
 
-            st.download_button(
-                label="📥 Скачать результат в Excel",
-                data=output.getvalue(),
-                file_name="Nuch_Report.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            st.download_button(label="📥 Скачать Excel", data=output.getvalue(), 
+                               file_name="Nuch_Report.xlsx", 
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
-            st.warning("⚠️ Совпадений по направлениям не найдено.")
-
+            st.warning("⚠️ Данные не найдены.")
     except Exception as e:
-        st.error(f"❌ Ошибка обработки: {e}")
+        st.error(f"❌ Ошибка: {e}")
