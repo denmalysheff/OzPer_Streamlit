@@ -43,7 +43,7 @@ if file_eval:
         df_eval_raw = pd.read_excel(file_eval, sheet_name='Оценка КМ')
         df_eval = fix_headers(df_eval_raw)
 
-        # Очистка данных
+        # Очистка данных от NaN
         df_eval = df_eval.dropna(subset=['КМ', 'ОЦЕНКА', 'КОДНАПР'])
         df_eval['КМ'] = pd.to_numeric(df_eval['КМ'], errors='coerce')
         df_eval['ОЦЕНКА'] = pd.to_numeric(df_eval['ОЦЕНКА'], errors='coerce')
@@ -76,20 +76,21 @@ if file_eval:
                     ]
                     
                     if not seg.empty:
-                        s5 = (seg['ОЦЕНКА'] == 5).sum()
-                        s4 = (seg['ОЦЕНКА'] == 4).sum()
-                        s3 = (seg['ОЦЕНКА'] == 3).sum()
-                        s2 = (seg['ОЦЕНКА'] == 2).sum()
+                        s5 = int((seg['ОЦЕНКА'] == 5).sum())
+                        s4 = int((seg['ОЦЕНКА'] == 4).sum())
+                        s3 = int((seg['ОЦЕНКА'] == 3).sum())
+                        s2 = int((seg['ОЦЕНКА'] == 2).sum())
                         all_km = len(seg)
                         
-                        # Расчет Nуч с округлением до 2 знаков
-                        n_uch = round((s5*5 + s4*4 + s3*3 - s2*5) / all_km, 2)
+                        # Расчет Nуч с принудительным округлением
+                        n_uch_val = (s5*5 + s4*4 + s3*3 - s2*5) / all_km
+                        n_uch = round(float(n_uch_val), 2)
                         
-                        # Собираем список километров с оценкой 2
+                        # Список КМ с оценкой 2
                         neud_list = seg[seg['ОЦЕНКА'] == 2]['КМ'].astype(int).astype(str).tolist()
                         neud_str = ", ".join(neud_list)
                         
-                        # Формируем словарь в нужном порядке столбцов
+                        # Собираем данные в строго заданном порядке столбцов
                         results.append({
                             'Направление': direction,
                             'Путь': path,
@@ -110,26 +111,30 @@ if file_eval:
             
             st.subheader("📊 Результаты расчета")
             
+            # Принудительное форматирование отображения в браузере (3.66)
             try:
                 st.dataframe(
-                    df_res.style.background_gradient(subset=['Nуч'], cmap='RdYlGn'), 
+                    df_res.style.format({"Nуч": "{:.2f}"})
+                    .background_gradient(subset=['Nуч'], cmap='RdYlGn'), 
                     use_container_width=True
                 )
             except:
                 st.dataframe(df_res, use_container_width=True)
 
-            # --- EXCEL ---
+            # --- ГЕНЕРАЦИЯ EXCEL ---
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 df_res.to_excel(writer, index=False, sheet_name='Результат', startrow=1)
                 workbook  = writer.book
                 worksheet = writer.sheets['Результат']
                 
-                fmt_header = workbook.add_format({'bold': True, 'align': 'center', 'font_size': 12, 'border': 1})
-                fmt_red    = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006', 'border': 1})
-                fmt_orange = workbook.add_format({'bg_color': '#FFEB9C', 'font_color': '#9C5700', 'border': 1})
-                fmt_blue   = workbook.add_format({'bg_color': '#DDEBF7', 'font_color': '#0070C0', 'border': 1})
-                fmt_green  = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100', 'border': 1})
+                # Стили Excel
+                fmt_header = workbook.add_format({'bold': True, 'align': 'center', 'border': 1})
+                fmt_num    = workbook.add_format({'num_format': '0.00', 'border': 1}) # Формат для Nуч
+                fmt_red    = workbook.add_format({'bg_color': '#FFC7CE', 'border': 1, 'num_format': '0.00'})
+                fmt_orange = workbook.add_format({'bg_color': '#FFEB9C', 'border': 1, 'num_format': '0.00'})
+                fmt_blue   = workbook.add_format({'bg_color': '#DDEBF7', 'border': 1, 'num_format': '0.00'})
+                fmt_green  = workbook.add_format({'bg_color': '#C6EFCE', 'border': 1, 'num_format': '0.00'})
 
                 worksheet.merge_range(0, 0, 0, len(df_res.columns)-1, "Отчет по Nуч по перегонам", fmt_header)
 
@@ -139,12 +144,14 @@ if file_eval:
                     elif 3 < val <= 4: curr_fmt = fmt_blue
                     elif 2.5 < val <= 3: curr_fmt = fmt_orange
                     else: curr_fmt = fmt_red
+                    
+                    # Применяем формат ко всей строке
                     worksheet.set_row(row_num, None, curr_fmt)
 
-                # Устанавливаем ширину колонок (для столбца со списком КМ сделаем пошире)
+                # Ширина колонок
                 for i, col in enumerate(df_res.columns):
-                    width = 25 if col == 'Список Неуд км' else 15
-                    worksheet.set_column(i, i, width)
+                    w = 30 if col == 'Список Неуд км' else 15
+                    worksheet.set_column(i, i, w)
 
             st.download_button(
                 label="📥 Скачать отчет в Excel",
