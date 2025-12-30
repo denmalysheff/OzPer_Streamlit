@@ -21,7 +21,7 @@ st.title("🚂 Расчет балловой оценки состояния п�
 if os.path.exists("header.png"):
     st.image("header.png", use_container_width=True)
 else:
-    st.info("💡 Загрузите файл 'header.png' для отображения баннера.")
+    st.info("💡 Загрузите файл 'header.png' в папку проекта для отображения баннера.")
 
 st.markdown("---")
 
@@ -75,15 +75,19 @@ if file_eval:
                                   (df_eval['КМ'] >= km_s) & (df_eval['КМ'] <= km_e)]
                     
                     if not seg.empty:
+                        # Подсчет количества
                         s5, s4, s3, s2 = (seg['ОЦЕНКА']==5).sum(), (seg['ОЦЕНКА']==4).sum(), \
                                          (seg['ОЦЕНКА']==3).sum(), (seg['ОЦЕНКА']==2).sum()
                         all_km = len(seg)
                         
+                        # Формула Nуч
                         n_uch_val = (s5*5 + s4*4 + s3*3 - s2*5) / all_km
                         n_uch = round(float(n_uch_val), 2)
                         
-                        neud_list = seg[seg['ОЦЕНКА'] == 2]['КМ'].astype(int).astype(str).tolist()
-                        neud_str = ", ".join(neud_list)
+                        # Функция для сбора списка КМ по оценке
+                        def get_km_list(val):
+                            lst = seg[seg['ОЦЕНКА'] == val]['КМ'].astype(int).astype(str).tolist()
+                            return ", ".join(lst)
                         
                         results.append({
                             'Направление': int(direction),
@@ -94,33 +98,27 @@ if file_eval:
                             'Всего Км': int(all_km),
                             'Nуч': n_uch,
                             'Отл': int(s5), 'Хор': int(s4), 'Удов': int(s3), 'Неуд': int(s2),
-                            'Список Неуд км': neud_str
+                            'Список Отл км': get_km_list(5),
+                            'Список Хор км': get_km_list(4),
+                            'Список Удов км': get_km_list(3),
+                            'Список Неуд км': get_km_list(2)
                         })
 
         if results:
             df_res = pd.DataFrame(results).sort_values(by='Nуч', ascending=True)
             
-            # Приведение всех "числовых" колонок к INT для корректного отображения
+            # Приведение числовых колонок к INT
             int_cols = ['Направление', 'Путь', 'Км нач', 'Км кон', 'Всего Км', 'Отл', 'Хор', 'Удов', 'Неуд']
             for c in int_cols:
-                if c in df_res.columns:
-                    df_res[c] = df_res[c].astype(int)
+                df_res[c] = df_res[c].astype(int)
 
             st.subheader("📊 Результаты расчета")
             
-            # Форматирование в браузере (Nуч - 2 знака, остальное - целое)
-            styled_df = df_res.style.format({
-                "Nуч": "{:.2f}",
-                "Направление": "{:d}", "Путь": "{:d}", "Км нач": "{:d}", 
-                "Км кон": "{:d}", "Всего Км": "{:d}", "Отл": "{:d}", 
-                "Хор": "{:d}", "Удов": "{:d}", "Неуд": "{:d}"
-            })
-
-            # Пытаемся применить градиент, если matplotlib установлен
+            # Стилизация в браузере
+            styled_df = df_res.style.format({"Nуч": "{:.2f}"})
             try:
                 st.dataframe(styled_df.background_gradient(subset=['Nуч'], cmap='RdYlGn'), use_container_width=True)
-            except ImportError:
-                st.warning("⚠️ Для цветной подсветки таблицы выполните: pip install matplotlib")
+            except:
                 st.dataframe(styled_df, use_container_width=True)
 
             # --- ГЕНЕРАЦИЯ EXCEL ---
@@ -134,7 +132,6 @@ if file_eval:
                 fmt_float = '0.00'
                 base = {'border': 1, 'align': 'center', 'valign': 'vcenter'}
                 
-                # Цвета для Excel
                 styles = {
                     'green':  [workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_int}),
                                workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_float, 'bold': True})],
@@ -161,22 +158,29 @@ if file_eval:
                     else: key = 'red'
                     
                     st_i, st_f = styles[key]
-                    
-                    # Записываем ячейки: Nуч дробно, остальное целым
+                    worksheet.set_row(row_num, None, st_i)
+
                     for c_idx, col_name in enumerate(df_res.columns):
                         cell_val = df_res.iloc[r_idx][col_name]
                         if col_name == 'Nуч':
                             worksheet.write(row_num, c_idx, cell_val, st_f)
-                        elif col_name == 'Список Неуд км' or col_name == 'Перегон':
-                            worksheet.write(row_num, c_idx, cell_val, st_i) # Для текста формат игнорируется
+                        elif "Список" in col_name or col_name == 'Перегон':
+                            worksheet.write(row_num, c_idx, cell_val, st_i)
                         else:
                             worksheet.write(row_num, c_idx, int(cell_val), st_i)
 
+                # Настройка ширины колонок
                 for i, col in enumerate(df_res.columns):
-                    worksheet.set_column(i, i, 40 if col == 'Список Неуд км' else 12)
+                    if "Список" in col:
+                        width = 30
+                    elif col == 'Перегон':
+                        width = 25
+                    else:
+                        width = 12
+                    worksheet.set_column(i, i, width)
 
             st.download_button(label="📥 Скачать Excel", data=output.getvalue(), 
-                               file_name="Nuch_Report.xlsx", 
+                               file_name="Nuch_Detailed_Report.xlsx", 
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
             st.warning("⚠️ Совпадений не найдено.")
