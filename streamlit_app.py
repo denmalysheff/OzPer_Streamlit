@@ -13,176 +13,134 @@ def fix_headers(df):
     return df
 
 # Настройка страницы
-st.set_page_config(page_title="Учет Nуч по перегонам", layout="wide")
+st.set_page_config(page_title="Мониторинг Nуч", layout="wide")
 
 # --- ОФОРМЛЕНИЕ ---
-st.title("🚂 Расчет балловой оценки состояния пути (Nуч)")
+st.title("🚂 Мониторинг и динамика оценки состояния пути (Nуч)")
 
 if os.path.exists("header.png"):
     st.image("header.png", use_container_width=True)
-else:
-    st.info("💡 Загрузите файл 'header.png' в папку проекта для отображения баннера.")
 
 st.markdown("---")
 
-# 2. Поиск базы станций
+# 2. База станций
 base_file_name = "stations_base.xlsx"
 if os.path.exists(base_file_name):
-    try:
-        df_base_raw = pd.read_excel(base_file_name)
-        df_base = fix_headers(df_base_raw)
-        df_base = df_base.dropna(subset=['КООРДИНАТА', 'НАПРАВЛЕНИЕ'])
-        df_base['КООРДИНАТА'] = pd.to_numeric(df_base['КООРДИНАТА'], errors='coerce')
-        df_base = df_base.dropna(subset=['КООРДИНАТА'])
-        st.sidebar.success("✅ База станций подключена")
-    except Exception as e:
-        st.error(f"Ошибка в файле базы: {e}")
-        st.stop()
+    df_base_raw = pd.read_excel(base_file_name)
+    df_base = fix_headers(df_base_raw)
+    df_base = df_base.dropna(subset=['КООРДИНАТА', 'НАПРАВЛЕНИЕ'])
+    df_base['КООРДИНАТА'] = pd.to_numeric(df_base['КООРДИНАТА'], errors='coerce')
+    df_base = df_base.dropna(subset=['КООРДИНАТА'])
 else:
     st.error(f"❌ Файл '{base_file_name}' не найден!")
     st.stop()
 
-# 3. Загрузка файла оценки
-file_eval = st.file_uploader("Загрузите файл ОЦЕНКИ (лист 'Оценка КМ')", type="xlsx")
+# 3. Загрузка файлов
+col_up1, col_up2 = st.columns(2)
+with col_up1:
+    file_curr = st.file_uploader("📂 ТЕКУЩИЙ месяц (Excel)", type="xlsx")
+with col_up2:
+    file_prev = st.file_uploader("📂 ПРОШЛЫЙ месяц (для сравнения)", type="xlsx")
 
-if file_eval:
-    try:
-        df_eval_raw = pd.read_excel(file_eval, sheet_name='Оценка КМ')
-        df_eval = fix_headers(df_eval_raw)
+def process_file(file):
+    if file is None: return None
+    df = pd.read_excel(file, sheet_name='Оценка КМ')
+    df = fix_headers(df)
+    cols = ['КМ', 'ОЦЕНКА', 'КОДНАПР']
+    df = df.dropna(subset=cols)
+    for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce')
+    return df.dropna(subset=cols)
 
-        # Очистка данных
-        cols_to_check = ['КМ', 'ОЦЕНКА', 'КОДНАПР']
-        df_eval = df_eval.dropna(subset=cols_to_check)
-        for col in cols_to_check:
-            df_eval[col] = pd.to_numeric(df_eval[col], errors='coerce')
-        df_eval = df_eval.dropna(subset=cols_to_check)
+def calculate_nuch(df_eval, df_base):
+    results = {}
+    valid_dirs = {24602, 24603, 24701}
+    for direction in df_base['НАПРАВЛЕНИЕ'].unique():
+        if direction not in valid_dirs: continue
+        stations = df_base[df_base['НАПРАВЛЕНИЕ'] == direction].sort_values('КООРДИНАТА')
+        paths = df_eval[df_eval['КОДНАПР'] == direction]['ПУТЬ'].unique()
+        for path in paths:
+            for i in range(len(stations) - 1):
+                st_a, st_b = stations.iloc[i], stations.iloc[i+1]
+                km_s, km_e = int(st_a['КООРДИНАТА']) + 1, int(st_b['КООРДИНАТА'])
+                seg = df_eval[(df_eval['КОДНАПР'] == direction) & (df_eval['ПУТЬ'] == path) & 
+                              (df_eval['КМ'] >= km_s) & (df_eval['КМ'] <= km_e)]
+                if not seg.empty:
+                    s5, s4, s3, s2 = (seg['ОЦЕНКА']==5).sum(), (seg['ОЦЕНКА']==4).sum(), \
+                                     (seg['ОЦЕНКА']==3).sum(), (seg['ОЦЕНКА']==2).sum()
+                    n_uch = round((s5*5 + s4*4 + s3*3 - s2*5) / len(seg), 2)
+                    key = f"{direction}_{path}_{st_a['СТАНЦИЯ']}_{st_b['СТАНЦИЯ']}"
+                    results[key] = {
+                        'Направление': int(direction), 'Путь': int(path),
+                        'Перегон': f"{st_a['СТАНЦИЯ']} - {st_b['СТАНЦИЯ']}",
+                        'Км нач': km_s, 'Км кон': km_e, 'Всего Км': len(seg),
+                        'Nуч': n_uch, 'Отл': s5, 'Хор': s4, 'Удов': s3, 'Неуд': s2,
+                        'Список Отл км': ", ".join(seg[seg['ОЦЕНКА']==5]['КМ'].astype(int).astype(str)),
+                        'Список Хор км': ", ".join(seg[seg['ОЦЕНКА']==4]['КМ'].astype(int).astype(str)),
+                        'Список Удов км': ", ".join(seg[seg['ОЦЕНКА']==3]['КМ'].astype(int).astype(str)),
+                        'Список Неуд км': ", ".join(seg[seg['ОЦЕНКА']==2]['КМ'].astype(int).astype(str))
+                    }
+    return results
 
-        results = []
-        valid_dirs = {24602, 24603, 24701}
+if file_curr:
+    df_c = process_file(file_curr)
+    res_c = calculate_nuch(df_c, df_base)
+    
+    # Сравнение
+    final_data = []
+    res_p = calculate_nuch(process_file(file_prev), df_base) if file_prev else {}
+
+    for key, data in res_c.items():
+        prev_val = res_p.get(key, {}).get('Nуч', None)
+        delta = round(data['Nуч'] - prev_val, 2) if prev_val is not None else 0
+        data['Динамика'] = delta
+        final_data.append(data)
+
+    df_res = pd.DataFrame(final_data).sort_values('Nуч')
+
+    # --- KPI КАРТОЧКИ ---
+    avg_nuch = round(df_res['Nуч'].mean(), 2)
+    bad_segs = len(df_res[df_res['Nуч'] < 2.5])
+    total_km = df_res['Всего Км'].sum()
+    
+    st.subheader("📈 Общие показатели")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Средний Nуч", avg_nuch, delta=round(avg_nuch - pd.DataFrame(res_p.values())['Nуч'].mean(), 2) if res_p else None)
+    c2.metric("Неуд. перегоны (Nуч < 2.5)", bad_segs)
+    c3.metric("Км в анализе", int(total_km))
+
+    # Таблица
+    st.subheader("📊 Детальный расчет по перегонам")
+    
+    def color_delta(val):
+        color = 'green' if val > 0 else 'red' if val < 0 else 'gray'
+        return f'color: {color}; font-weight: bold'
+
+    styled_df = df_res.style.format({"Nуч": "{:.2f}", "Динамика": "{:+.2f}"})\
+        .applymap(color_delta, subset=['Динамика'])\
+        .background_gradient(subset=['Nуч'], cmap='RdYlGn')
+    
+    st.dataframe(styled_df, use_container_width=True)
+
+    # --- EXCEL ---
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_res.to_excel(writer, index=False, sheet_name='Анализ', startrow=1)
+        workbook, worksheet = writer.book, writer.sheets['Анализ']
         
-        for direction in df_base['НАПРАВЛЕНИЕ'].unique():
-            if direction not in valid_dirs: continue
-            
-            stations = df_base[df_base['НАПРАВЛЕНИЕ'] == direction].sort_values('КООРДИНАТА')
-            paths = df_eval[df_eval['КОДНАПР'] == direction]['ПУТЬ'].unique()
+        # Стили
+        f_int = workbook.add_format({'border': 1, 'align': 'center', 'num_format': '0'})
+        f_float = workbook.add_format({'border': 1, 'align': 'center', 'num_format': '0.00', 'bold': True})
+        f_hdr = workbook.add_format({'bold': True, 'border': 1, 'bg_color': '#D9D9D9', 'align': 'center'})
+        
+        for c_idx, col in enumerate(df_res.columns):
+            worksheet.write(1, c_idx, col, f_hdr)
+            worksheet.set_column(c_idx, c_idx, 15 if "Список" not in col else 30)
 
-            for path in paths:
-                for i in range(len(stations) - 1):
-                    st_a, st_b = stations.iloc[i], stations.iloc[i+1]
-                    km_s, km_e = int(st_a['КООРДИНАТА']) + 1, int(st_b['КООРДИНАТА'])
-                    
-                    seg = df_eval[(df_eval['КОДНАПР'] == direction) & (df_eval['ПУТЬ'] == path) & 
-                                  (df_eval['КМ'] >= km_s) & (df_eval['КМ'] <= km_e)]
-                    
-                    if not seg.empty:
-                        # Подсчет количества
-                        s5, s4, s3, s2 = (seg['ОЦЕНКА']==5).sum(), (seg['ОЦЕНКА']==4).sum(), \
-                                         (seg['ОЦЕНКА']==3).sum(), (seg['ОЦЕНКА']==2).sum()
-                        all_km = len(seg)
-                        
-                        # Формула Nуч
-                        n_uch_val = (s5*5 + s4*4 + s3*3 - s2*5) / all_km
-                        n_uch = round(float(n_uch_val), 2)
-                        
-                        # Функция для сбора списка КМ по оценке
-                        def get_km_list(val):
-                            lst = seg[seg['ОЦЕНКА'] == val]['КМ'].astype(int).astype(str).tolist()
-                            return ", ".join(lst)
-                        
-                        results.append({
-                            'Направление': int(direction),
-                            'Путь': int(path),
-                            'Перегон': f"{st_a['СТАНЦИЯ']} - {st_b['СТАНЦИЯ']}",
-                            'Км нач': int(km_s),
-                            'Км кон': int(km_e),
-                            'Всего Км': int(all_km),
-                            'Nуч': n_uch,
-                            'Отл': int(s5), 'Хор': int(s4), 'Удов': int(s3), 'Неуд': int(s2),
-                            'Список Отл км': get_km_list(5),
-                            'Список Хор км': get_km_list(4),
-                            'Список Удов км': get_km_list(3),
-                            'Список Неуд км': get_km_list(2)
-                        })
+        for r_idx in range(len(df_res)):
+            row = r_idx + 2
+            for c_idx, col in enumerate(df_res.columns):
+                val = df_res.iloc[r_idx][col]
+                fmt = f_float if col in ['Nуч', 'Динамика'] else f_int
+                worksheet.write(row, c_idx, val, fmt)
 
-        if results:
-            df_res = pd.DataFrame(results).sort_values(by='Nуч', ascending=True)
-            
-            # Приведение числовых колонок к INT
-            int_cols = ['Направление', 'Путь', 'Км нач', 'Км кон', 'Всего Км', 'Отл', 'Хор', 'Удов', 'Неуд']
-            for c in int_cols:
-                df_res[c] = df_res[c].astype(int)
-
-            st.subheader("📊 Результаты расчета")
-            
-            # Стилизация в браузере
-            styled_df = df_res.style.format({"Nуч": "{:.2f}"})
-            try:
-                st.dataframe(styled_df.background_gradient(subset=['Nуч'], cmap='RdYlGn'), use_container_width=True)
-            except:
-                st.dataframe(styled_df, use_container_width=True)
-
-            # --- ГЕНЕРАЦИЯ EXCEL ---
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df_res.to_excel(writer, index=False, sheet_name='Результат', startrow=1)
-                workbook  = writer.book
-                worksheet = writer.sheets['Результат']
-                
-                fmt_int = '0'
-                fmt_float = '0.00'
-                base = {'border': 1, 'align': 'center', 'valign': 'vcenter'}
-                
-                styles = {
-                    'green':  [workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_int}),
-                               workbook.add_format({**base, 'bg_color': '#C6EFCE', 'num_format': fmt_float, 'bold': True})],
-                    'blue':   [workbook.add_format({**base, 'bg_color': '#DDEBF7', 'num_format': fmt_int}),
-                               workbook.add_format({**base, 'bg_color': '#DDEBF7', 'num_format': fmt_float, 'bold': True})],
-                    'orange': [workbook.add_format({**base, 'bg_color': '#FFEB9C', 'num_format': fmt_int}),
-                               workbook.add_format({**base, 'bg_color': '#FFEB9C', 'num_format': fmt_float, 'bold': True})],
-                    'red':    [workbook.add_format({**base, 'bg_color': '#FFC7CE', 'num_format': fmt_int}),
-                               workbook.add_format({**base, 'bg_color': '#FFC7CE', 'num_format': fmt_float, 'bold': True})]
-                }
-                
-                fmt_header = workbook.add_format({'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#F2F2F2'})
-                worksheet.merge_range(0, 0, 0, len(df_res.columns)-1, "Отчет по балловой оценке состояния пути", fmt_header)
-
-                n_uch_idx = df_res.columns.get_loc('Nуч')
-
-                for r_idx in range(len(df_res)):
-                    val = df_res.iloc[r_idx]['Nуч']
-                    row_num = r_idx + 2
-                    
-                    if val > 4: key = 'green'
-                    elif 3 < val <= 4: key = 'blue'
-                    elif 2.5 < val <= 3: key = 'orange'
-                    else: key = 'red'
-                    
-                    st_i, st_f = styles[key]
-                    worksheet.set_row(row_num, None, st_i)
-
-                    for c_idx, col_name in enumerate(df_res.columns):
-                        cell_val = df_res.iloc[r_idx][col_name]
-                        if col_name == 'Nуч':
-                            worksheet.write(row_num, c_idx, cell_val, st_f)
-                        elif "Список" in col_name or col_name == 'Перегон':
-                            worksheet.write(row_num, c_idx, cell_val, st_i)
-                        else:
-                            worksheet.write(row_num, c_idx, int(cell_val), st_i)
-
-                # Настройка ширины колонок
-                for i, col in enumerate(df_res.columns):
-                    if "Список" in col:
-                        width = 30
-                    elif col == 'Перегон':
-                        width = 25
-                    else:
-                        width = 12
-                    worksheet.set_column(i, i, width)
-
-            st.download_button(label="📥 Скачать Excel", data=output.getvalue(), 
-                               file_name="Nuch_Detailed_Report.xlsx", 
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        else:
-            st.warning("⚠️ Совпадений не найдено.")
-    except Exception as e:
-        st.error(f"❌ Ошибка: {e}")
+    st.download_button("📥 Скачать полный отчет", output.getvalue(), "Nuch_Full_Report.xlsx")
