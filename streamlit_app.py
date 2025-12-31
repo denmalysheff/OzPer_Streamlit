@@ -2,25 +2,30 @@ import streamlit as st
 import pandas as pd
 import io
 import os
+import plotly.express as px
 
 # 1. Функция исправления заголовков
 def fix_headers(df):
     def clean_text(text):
         if not isinstance(text, str): return text
+        # Исправление смешанной раскладки (лат -> кир)
         trans = str.maketrans("KMABOCPETX", "КМАВОСРЕТХ")
         return text.strip().upper().translate(trans)
     df.columns = [clean_text(col) for col in df.columns]
     return df
 
+# Функция поиска нужного листа
+def find_sheet(xl, target_name):
+    target_cleaned = target_name.replace(" ", "").upper()
+    for sheet in xl.sheet_names:
+        if sheet.replace(" ", "").upper() == target_cleaned:
+            return sheet
+    return None
+
 # Настройка страницы
 st.set_page_config(page_title="Детальный мониторинг Nуч", layout="wide")
 
-# --- ОФОРМЛЕНИЕ ---
-st.title("🚂 Сравнительный анализ Nуч и изменений по километрам")
-
-if os.path.exists("header.png"):
-    st.image("header.png", use_container_width=True)
-
+st.title("🚂 Сравнительный анализ Nуч и изменений")
 st.markdown("---")
 
 # 2. Загрузка базы станций
@@ -39,24 +44,37 @@ else:
     st.error(f"❌ Файл '{base_file_name}' не найден!")
     st.stop()
 
-# 3. Интерфейс загрузки двух файлов
+# 3. Интерфейс загрузки
 col_up1, col_up2 = st.columns(2)
 with col_up1:
-    file_prev = st.file_uploader("📂 ПРОШЛЫЙ месяц (База для сравнения)", type="xlsx")
+    file_prev = st.file_uploader("📂 ПРОШЛЫЙ месяц (База)", type="xlsx")
 with col_up2:
     file_curr = st.file_uploader("📂 ТЕКУЩИЙ месяц (Результат)", type="xlsx")
 
 def process_excel_data(file):
     if file is None: return None
     try:
-        df = pd.read_excel(file, sheet_name='Оценка КМ')
+        xl = pd.ExcelFile(file)
+        sheet = find_sheet(xl, "Оценка КМ")
+        if not sheet:
+            st.warning(f"Лист 'Оценка КМ' не найден в файле {file.name}")
+            return None
+        
+        df = pd.read_excel(file, sheet_name=sheet)
         df = fix_headers(df)
         cols = ['КМ', 'ОЦЕНКА', 'КОДНАПР', 'ПУТЬ']
+        
+        # Проверка наличия колонок
+        if not all(c in df.columns for c in cols):
+            st.error(f"В файле {file.name} отсутствуют нужные колонки {cols}")
+            return None
+            
         df = df.dropna(subset=cols)
         for c in cols:
             df[c] = pd.to_numeric(df[c], errors='coerce')
         return df.dropna(subset=cols)
-    except:
+    except Exception as e:
+        st.error(f"Ошибка при чтении {file.name}: {e}")
         return None
 
 def get_detailed_results(df_eval, df_base):
@@ -82,8 +100,6 @@ def get_detailed_results(df_eval, df_base):
                     s5, s4, s3, s2 = (seg['ОЦЕНКА']==5).sum(), (seg['ОЦЕНКА']==4).sum(), \
                                      (seg['ОЦЕНКА']==3).sum(), (seg['ОЦЕНКА']==2).sum()
                     n_uch = round((s5*5 + s4*4 + s3*3 - s2*5) / len(seg), 2)
-                    
-                    # Создаем словарь км -> оценка для этого перегона
                     km_map = dict(zip(seg['КМ'].astype(int), seg['ОЦЕНКА'].astype(int)))
                     
                     key = f"{direction}_{path}_{st_a['СТАНЦИЯ']}_{st_b['СТАНЦИЯ']}"
@@ -100,8 +116,8 @@ if file_curr:
     df_c_data = process_excel_data(file_curr)
     res_curr = get_detailed_results(df_c_data, df_base)
     
-    df_p_data = process_excel_data(file_prev)
-    res_prev = get_detailed_results(df_p_data, df_base) if file_prev else {}
+    df_p_data = process_excel_data(file_prev) if file_prev else None
+    res_prev = get_detailed_results(df_p_data, df_base) if df_p_data is not None else {}
 
     comparison_results = []
     for key, data in res_curr.items():
@@ -110,73 +126,75 @@ if file_curr:
         prev_km_map = prev_data.get('km_map', {})
         curr_km_map = data.get('km_map', {})
         
-        # Сравниваем оценки по каждому километру
         changes = []
         for km, score in curr_km_map.items():
             if km in prev_km_map:
                 old_score = prev_km_map[km]
                 if score != old_score:
-                    changes.append(f"{km}км ({old_score}→{score})")
+                    changes.append(f"{km}км({old_score}→{score})")
         
         change_str = ", ".join(changes) if changes else "Без изменений"
-        
         data['Прошлый Nуч'] = prev_nuch if prev_nuch is not None else data['Nуч']
         data['Динамика'] = round(data['Nуч'] - data['Прошлый Nуч'], 2)
         data['Изменившиеся км'] = change_str
         
-        # Убираем km_map из финальной таблицы
         output_row = {k: v for k, v in data.items() if k != 'km_map'}
         comparison_results.append(output_row)
 
-    df_final = pd.DataFrame(comparison_results).sort_values('Nуч')
+    if comparison_results:
+        df_final = pd.DataFrame(comparison_results).sort_values('Nуч')
 
-    # --- KPI ---
-    st.subheader("📊 Анализ изменений")
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Средний Nуч", f"{df_final['Nуч'].mean():.2f}")
-    k2.metric("Улучшилось перегонов", len(df_final[df_final['Динамика'] > 0]))
-    k3.metric("Ухудшилось перегонов", len(df_final[df_final['Динамика'] < 0]))
+        # --- KPI ---
+        st.subheader("📊 Анализ изменений")
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Средний Nуч", f"{df_final['Nуч'].mean():.2f}")
+        k2.metric("Улучшилось (перегонов)", len(df_final[df_final['Динамика'] > 0]))
+        k3.metric("Ухудшилось (перегонов)", len(df_final[df_final['Динамика'] < 0]))
 
-    # --- ТАБЛИЦА ---
-    st.subheader("📋 Детальный отчет")
-    
-    def style_diff(val):
-        if "→" in str(val):
-            # Проверяем, стало лучше или хуже в строке
-            if any(int(x[0]) < int(x[-1]) for x in [val.split('(')[-1].replace(')','').split('→') if '→' in val else "0→0"]):
-                return 'background-color: #e6ffed'
-        return ''
+        # --- ГРАФИК ДИНАМИКИ ---
+        fig = px.bar(df_final, x='Перегон', y='Динамика', 
+                     color='Динамика', color_continuous_scale='RdYlGn',
+                     title="Динамика изменения Nуч по перегонам")
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.dataframe(
-        df_final.style.format({"Nуч": "{:.2f}", "Прошлый Nуч": "{:.2f}", "Динамика": "{:+.2f}"})
-        .background_gradient(subset=['Nуч'], cmap='RdYlGn')
-        .applymap(lambda x: 'color: green' if x > 0 else ('color: red' if x < 0 else ''), subset=['Динамика']),
-        use_container_width=True
-    )
-
-    # --- EXCEL ---
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_final.to_excel(writer, index=False, sheet_name='Анализ', startrow=1)
-        workbook = writer.book
-        worksheet = writer.sheets['Анализ']
+        # --- ТАБЛИЦА С ОФОРМЛЕНИЕМ ---
+        st.subheader("📋 Детальный отчет")
         
-        f_int = workbook.add_format({'border': 1, 'align': 'center'})
-        f_float = workbook.add_format({'border': 1, 'align': 'center', 'num_format': '0.00'})
-        f_bold = workbook.add_format({'border': 1, 'align': 'center', 'bold': True})
-        
-        for c_idx, col in enumerate(df_final.columns):
-            worksheet.set_column(c_idx, c_idx, 20 if "Изменившиеся" in col else 12)
+        def style_rows(row):
+            styles = [''] * len(row)
+            # Подсветка колонки изменений
+            if row['Изменившиеся км'] != "Без изменений":
+                idx = row.index.get_loc('Изменившиеся км')
+                styles[idx] = 'background-color: #f0f7ff; font-weight: bold'
+            return styles
+
+        st.dataframe(
+            df_final.style.format({
+                "Nуч": "{:.2f}", 
+                "Прошлый Nуч": "{:.2f}", 
+                "Динамика": "{:+.2f}"
+            })
+            .background_gradient(subset=['Nуч'], cmap='RdYlGn')
+            .apply(style_rows, axis=1)
+            .applymap(lambda x: 'color: green' if x > 0 else ('color: red' if x < 0 else ''), subset=['Динамика']),
+            use_container_width=True
+        )
+
+        # --- EXCEL ---
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df_final.to_excel(writer, index=False, sheet_name='Анализ')
+            workbook = writer.book
+            worksheet = writer.sheets['Анализ']
             
-        # Условное форматирование для Динамики в Excel
-        worksheet.conditional_format(2, df_final.columns.get_loc('Динамика'), len(df_final)+1, df_final.columns.get_loc('Динамика'), {
-            'type':     'cell',
-            'criteria': '>',
-            'value':    0,
-            'format':   workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
-        })
+            # Настройка ширины колонок в Excel
+            for i, col in enumerate(df_final.columns):
+                width = max(len(str(col)), 15)
+                if col == 'Изменившиеся км': width = 40
+                worksheet.set_column(i, i, width)
 
-    st.download_button("📥 Скачать детальный отчет", output.getvalue(), "Nuch_Km_Changes.xlsx")
-
+        st.download_button("📥 Скачать детальный отчет", output.getvalue(), "Nuch_Km_Changes.xlsx")
+    else:
+        st.warning("Нет данных для отображения.")
 else:
     st.info("💡 Загрузите два файла для сравнения изменений по километрам.")
