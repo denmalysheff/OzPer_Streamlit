@@ -4,70 +4,80 @@ import io
 import os
 import plotly.express as px
 
+
 # --- 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def fix_headers(df):
-    """Исправляет заголовки таблицы (кириллица/латиница, регистр)."""
+    """
+    Исправляет заголовки таблицы.
+    Иногда в Excel 'КМ' написано английскими буквами, иногда русскими.
+    Функция переводит всё в верхний регистр и меняет латиницу на кириллицу.
+    """
+
     def clean_text(text):
         if not isinstance(text, str): return text
+        # Словарь замен: ключ - латиница, значение - кириллица
         trans = str.maketrans("KMABOCPETX", "КМАВОСРЕТХ")
         return text.strip().upper().translate(trans)
+
     df.columns = [clean_text(col) for col in df.columns]
     return df
 
+
 def find_sheet(xl, target_name):
-    """Ищет лист в Excel-файле."""
+    """
+    Ищет лист в Excel-файле, игнорируя пробелы и регистр.
+    Например, найдет и 'Оценка КМ', и 'оценкакм'.
+    """
     target_cleaned = target_name.replace(" ", "").upper()
     for sheet in xl.sheet_names:
         if sheet.replace(" ", "").upper() == target_cleaned:
             return sheet
     return None
 
-# --- 2. НАСТРОЙКА ИНТЕРФЕЙСА ---
-st.set_page_config(page_title="Мониторинг Nуч + Целостность", layout="wide")
 
+# --- 2. НАСТРОЙКА ИНТЕРФЕЙСА ---
+
+# Устанавливаем широкое отображение страницы
+st.set_page_config(page_title="Мониторинг Nуч", layout="wide")
+
+# Проверяем наличие логотипа и выводим его
 if os.path.exists("header.png"):
     st.image("header.png", use_container_width=True)
 
-st.title("🚂 Анализ Nуч и проверка целостности данных")
+st.title("🚂 Сравнительный анализ Nуч по километрам")
+st.info("Загрузите файлы, чтобы увидеть динамику изменений состояния пути.")
 
-# --- 3. ЗАГРУЗКА БАЗОВЫХ ДАННЫХ (СТАНЦИИ И СТРУКТУРА ПД) ---
+# --- 3. ЗАГРУЗКА БАЗОВЫХ ДАННЫХ ---
 
-@st.cache_data
-def load_base_files():
-    # 1. Загрузка базы станций
-    base_file = "stations_base.xlsx"
-    if not os.path.exists(base_file):
-        st.error(f"❌ Файл '{base_file}' не найден!")
+base_file_name = "stations_base.xlsx"
+if os.path.exists(base_file_name):
+    try:
+        # Читаем базу станций (координаты начала и конца перегонов)
+        df_base_raw = pd.read_excel(base_file_name)
+        df_base = fix_headers(df_base_raw)
+        # Очищаем данные от пустых строк в важных колонках
+        df_base = df_base.dropna(subset=['КООРДИНАТА', 'НАПРАВЛЕНИЕ'])
+        df_base['КООРДИНАТА'] = pd.to_numeric(df_base['КООРДИНАТА'], errors='coerce')
+        df_base = df_base.dropna(subset=['КООРДИНАТА'])
+    except Exception as e:
+        st.error(f"Ошибка в файле базы станций: {e}")
         st.stop()
-    df_base = fix_headers(pd.read_excel(base_file))
-    
-    # 2. Загрузка структуры ПД (административная структура)
-    struct_file = "adm_struktur.xlsx"
-    if not os.path.exists(struct_file):
-        st.error(f"❌ Файл '{struct_file}' не найден! (Нужен для проверки целостности)")
-        st.stop()
-    df_struct = fix_headers(pd.read_excel(struct_file))
-    
-    # Приведение типов для структуры
-    struct_cols = ['НАПРАВЛЕНИЕ', 'ПУТЬ', 'КМ НАЧАЛА', 'КМ КОНЦА']
-    for col in struct_cols:
-        if col in df_struct.columns:
-            df_struct[col] = pd.to_numeric(df_struct[col], errors='coerce')
-    
-    return df_base.dropna(subset=['КООРДИНАТА']), df_struct.dropna(subset=struct_cols)
-
-df_base, df_struct = load_base_files()
+else:
+    st.error(f"❌ Файл '{base_file_name}' не найден в папке с программой!")
+    st.stop()
 
 # --- 4. ЗАГРУЗКА ПОЛЬЗОВАТЕЛЬСКИХ ФАЙЛОВ ---
 
 col_up1, col_up2 = st.columns(2)
 with col_up1:
-    file_prev = st.file_uploader("📂 Шаг 1: ПРОШЛЫЙ месяц", type="xlsx")
+    file_prev = st.file_uploader("📂 Шаг 1: Загрузите ПРОШЛЫЙ месяц", type="xlsx")
 with col_up2:
-    file_curr = st.file_uploader("📂 Шаг 2: ТЕКУЩИЙ месяц", type="xlsx")
+    file_curr = st.file_uploader("📂 Шаг 2: Загрузите ТЕКУЩИЙ месяц", type="xlsx")
+
 
 def process_excel_data(file):
+    """Функция для извлечения данных из загруженного Excel"""
     if file is None: return None
     try:
         xl = pd.ExcelFile(file)
@@ -75,80 +85,60 @@ def process_excel_data(file):
         if not sheet:
             st.warning(f"Лист 'Оценка КМ' не найден в {file.name}")
             return None
+
         df = pd.read_excel(file, sheet_name=sheet)
         df = fix_headers(df)
+
+        # Оставляем только нужные колонки для расчета
         cols = ['КМ', 'ОЦЕНКА', 'КОДНАПР', 'ПУТЬ']
-        for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce')
+        df = df.dropna(subset=cols)
+        for c in cols:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
         return df.dropna(subset=cols)
     except Exception as e:
-        st.error(f"Ошибка чтения {file.name}: {e}")
+        st.error(f"Не удалось прочитать данные: {e}")
         return None
 
-# --- 5. БЛОК ПРОВЕРКИ ЦЕЛОСТНОСТИ ---
 
-def check_integrity(df_eval, df_struct):
-    """Сравнивает наличие КМ в загруженном файле со справочником ПД."""
-    missing_report = []
-    
-    # Итерируемся по участкам ПД (Линейным участкам)
-    for _, row in df_struct.iterrows():
-        dir_id = row['НАПРАВЛЕНИЕ']
-        path_id = row['ПУТЬ']
-        km_start = int(row['КМ НАЧАЛА'])
-        km_end = int(row['КМ КОНЦА'])
-        pd_name = row.get('ЛИНЕЙНЫЙ УЧАСТОК (ПД)', f"ПД-{_}")
-        
-        # Создаем множество эталонных километров для этого участка
-        required_kms = set(range(km_start, km_end + 1))
-        
-        # Находим фактически присутствующие км в данных
-        actual_kms = set(df_eval[
-            (df_eval['КОДНАПР'] == dir_id) & 
-            (df_eval['ПУТЬ'] == path_id) & 
-            (df_eval['КМ'] >= km_start) & 
-            (df_eval['КМ'] <= km_end)
-        ]['КМ'].astype(int).unique())
-        
-        missing = required_kms - actual_kms
-        
-        if missing:
-            missing_report.append({
-                "Линейный участок": pd_name,
-                "Направление": dir_id,
-                "Путь": path_id,
-                "Всего км": len(required_kms),
-                "Пропущено": len(missing),
-                "Список пропусков": ", ".join(map(str, sorted(list(missing))))
-            })
-            
-    return pd.DataFrame(missing_report)
-
-# --- 6. ОСНОВНОЙ РАСЧЕТ Nуч ---
+# --- 5. ГЛАВНЫЙ АЛГОРИТМ РАСЧЕТА ---
 
 def get_detailed_results(df_eval, df_base):
+    """Распределяет километры по перегонам и считает Nуч"""
     if df_eval is None: return {}
     results = {}
-    valid_dirs = set(df_base['НАПРАВЛЕНИЕ'].unique())
-    
-    for direction in valid_dirs:
+    # Коды направлений, которые мы анализируем
+    valid_dirs = {24602, 24603, 24701}
+
+    for direction in df_base['НАПРАВЛЕНИЕ'].unique():
+        if direction not in valid_dirs: continue
+
+        # Получаем список станций для конкретного направления
         stations = df_base[df_base['НАПРАВЛЕНИЕ'] == direction].sort_values('КООРДИНАТА')
+        # Определяем, какие пути есть в данных (1-й, 2-й и т.д.)
         paths = df_eval[df_eval['КОДНАПР'] == direction]['ПУТЬ'].unique()
-        
+
         for path in paths:
+            # Идем по парам станций (станция А и станция Б = перегон)
             for i in range(len(stations) - 1):
-                st_a, st_b = stations.iloc[i], stations.iloc[i+1]
+                st_a, st_b = stations.iloc[i], stations.iloc[i + 1]
                 km_s, km_e = int(st_a['КООРДИНАТА']) + 1, int(st_b['КООРДИНАТА'])
-                
-                seg = df_eval[(df_eval['КОДНАПР'] == direction) & 
-                              (df_eval['ПУТЬ'] == path) & 
+
+                # Фильтруем километры, попавшие в границы этого перегона
+                seg = df_eval[(df_eval['КОДНАПР'] == direction) &
+                              (df_eval['ПУТЬ'] == path) &
                               (df_eval['КМ'] >= km_s) & (df_eval['КМ'] <= km_e)]
-                
+
                 if not seg.empty:
-                    s5, s4, s3, s2 = (seg['ОЦЕНКА']==5).sum(), (seg['ОЦЕНКА']==4).sum(), \
-                                     (seg['ОЦЕНКА']==3).sum(), (seg['ОЦЕНКА']==2).sum()
-                    n_uch = round((s5*5 + s4*4 + s3*3 - s2*5) / len(seg), 2)
+                    # Считаем количество каждой оценки
+                    s5, s4, s3, s2 = (seg['ОЦЕНКА'] == 5).sum(), (seg['ОЦЕНКА'] == 4).sum(), \
+                        (seg['ОЦЕНКА'] == 3).sum(), (seg['ОЦЕНКА'] == 2).sum()
+
+                    # Формула расчета Nуч (балловая оценка участка)
+                    n_uch = round((s5 * 5 + s4 * 4 + s3 * 3 - s2 * 5) / len(seg), 2)
+
+                    # Сохраняем "карту" оценок по километрам для этого перегона
                     km_map = dict(zip(seg['КМ'].astype(int), seg['ОЦЕНКА'].astype(int)))
-                    
+
                     key = f"{direction}_{path}_{st_a['СТАНЦИЯ']}_{st_b['СТАНЦИЯ']}"
                     results[key] = {
                         'Направление': int(direction), 'Путь': int(path),
@@ -159,66 +149,81 @@ def get_detailed_results(df_eval, df_base):
                     }
     return results
 
-# --- 7. ВЫВОД РЕЗУЛЬТАТОВ ---
+
+# --- 6. ОБРАБОТКА И ВЫВОД РЕЗУЛЬТАТОВ ---
 
 if file_curr:
-    df_curr_raw = process_excel_data(file_curr)
-    
-    # 7.1 ПРОВЕРКА ЦЕЛОСТНОСТИ (Выводим первой)
-    st.subheader("⚠️ Проверка полноты данных (на основе adm_struktur)")
-    if df_curr_raw is not None:
-        df_integrity = check_integrity(df_curr_raw, df_struct)
-        if not df_integrity.empty:
-            st.error(f"Обнаружены пропуски километров на {len(df_integrity)} участках ПД!")
-            st.dataframe(df_integrity, use_container_width=True)
-        else:
-            st.success("✅ Все километры согласно структуре ПД присутствуют в файле.")
+    # Обрабатываем текущий месяц
+    df_c_data = process_excel_data(file_curr)
+    res_curr = get_detailed_results(df_c_data, df_base)
 
-    # 7.2 РАСЧЕТ ДИНАМИКИ
-    res_curr = get_detailed_results(df_curr_raw, df_base)
+    # Обрабатываем прошлый месяц (если загружен)
     res_prev = get_detailed_results(process_excel_data(file_prev), df_base) if file_prev else {}
 
     comparison = []
     for key, data in res_curr.items():
         prev = res_prev.get(key, {})
+        # Если данных за прошлый месяц нет, считаем динамику от текущего (0)
         data['Прошлый Nуч'] = prev.get('Nуч', data['Nуч'])
         data['Динамика'] = round(data['Nуч'] - data['Прошлый Nуч'], 2)
-        
-        curr_map = data.pop('km_map', {})
+
+        # Сравниваем оценки по каждому километру (аудит изменений)
+        changes = []
+        curr_map = data.pop('km_map', {})  # Извлекаем карту и удаляем из словаря для таблицы
         prev_map = prev.get('km_map', {})
-        changes = [f"{k}км({prev_map[k]}→{v})" for k, v in curr_map.items() if k in prev_map and v != prev_map[k]]
-        
+
+        for km, score in curr_map.items():
+            if km in prev_map and score != prev_map[km]:
+                changes.append(f"{km}км({prev_map[km]}→{score})")
+
         data['Изменившиеся км'] = ", ".join(changes) if changes else "Без изменений"
         comparison.append(data)
 
     if comparison:
         df_final = pd.DataFrame(comparison).sort_values('Nуч')
-        
-        # График
-        st.subheader("📈 Динамика изменения Nуч")
-        fig = px.bar(df_final, x='Перегон', y='Динамика', color='Динамика', 
-                     color_continuous_scale='RdYlGn', hover_data=['Направление', 'Путь'])
+
+        # Отображаем график динамики
+        st.subheader("📈 График изменений (Динамика)")
+        fig = px.bar(df_final, x='Перегон', y='Динамика', color='Динамика',
+                     color_continuous_scale='RdYlGn',
+                     hover_data=['Направление', 'Путь'])
         st.plotly_chart(fig, use_container_width=True)
 
-        # Основная таблица
-        st.subheader("📋 Детальный отчет")
+
+        # Функция для раскраски текста динамики (зеленый/красный)
         def color_dyn(val):
             if isinstance(val, (int, float)):
                 if val > 0: return 'color: #008000; font-weight: bold'
                 if val < 0: return 'color: #FF0000; font-weight: bold'
             return ''
 
+
+        # Вывод основной таблицы
+        st.subheader("📋 Детальные данные по перегонам")
         st.dataframe(
-            df_final.style.format({"Nуч": "{:.2f}", "Прошлый Nуч": "{:.2f}", "Динамика": "{:+.2f}"})
-            .background_gradient(subset=['Nуч'], cmap='RdYlGn')
-            .map(color_dyn, subset=['Динамика']),
+            df_final.style.format({
+                "Nуч": "{:.2f}",
+                "Прошлый Nуч": "{:.2f}",
+                "Динамика": "{:+.2f}"
+            })
+            .background_gradient(subset=['Nуч'], cmap='RdYlGn')  # Цвет фона для Nуч
+            .map(color_dyn, subset=['Динамика']),  # Цвет текста для Динамики
             use_container_width=True
         )
 
-        # Экспорт
+        # --- 7. ЭКСПОРТ В EXCEL ---
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_final.to_excel(writer, index=False, sheet_name='Анализ')
-        st.download_button("📥 Скачать Excel отчет", output.getvalue(), "Analiz_Nuch.xlsx")
+            # Здесь можно добавить доп. форматирование Excel при необходимости
+
+        st.download_button(
+            label="📥 Скачать полный отчет в Excel",
+            data=output.getvalue(),
+            file_name="Analiz_Nuch.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.warning("Не удалось сопоставить данные. Проверьте коды направлений в файлах.")
 else:
-    st.info("Загрузите файлы для начала анализа.")
+    st.info("👋 Добро пожаловать! Начните с загрузки файлов в верхней части страницы.")
